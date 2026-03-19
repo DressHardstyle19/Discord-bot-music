@@ -1,9 +1,11 @@
 import discord
 import asyncio
 import yt_dlp
+import subprocess
+import os
 from collections import deque
 
-YDL_SEARCH_OPTIONS = {
+YDL_OPTIONS = {
     "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
@@ -12,8 +14,50 @@ YDL_SEARCH_OPTIONS = {
     "source_address": "0.0.0.0",
 }
 
-FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-FFMPEG_OPTIONS = "-vn"
+FFMPEG_OPTIONS = {
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "options": "-vn -ar 48000 -ac 2",
+}
+
+
+def find_and_load_opus():
+    if discord.opus.is_loaded():
+        return True
+
+    # Ruta conocida en este entorno (intento rápido primero)
+    known_paths = [
+        "/nix/store/0py9xncsn0s6vqxhvqblvhs2cqbb30s8-libopus-1.5.2/lib/libopus.so.0",
+        "/nix/store/235dxwql4lqrfjfhqrld8i3pwcffhwxf-libopus-1.4/lib/libopus.so.0",
+    ]
+    for path in known_paths:
+        if os.path.exists(path):
+            try:
+                discord.opus.load_opus(path)
+                print(f"[INFO] libopus cargada desde: {path}")
+                return True
+            except Exception as e:
+                print(f"[WARN] Fallo {path}: {e}")
+
+    # Busqueda dinamica con grep (mas rapida que os.listdir)
+    try:
+        result = subprocess.run(
+            ["sh", "-c", "ls /nix/store | grep -m3 'libopus'"],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.strip().splitlines():
+            path = f"/nix/store/{line.strip()}/lib/libopus.so.0"
+            if os.path.exists(path):
+                try:
+                    discord.opus.load_opus(path)
+                    print(f"[INFO] libopus cargada desde: {path}")
+                    return True
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"[WARN] Busqueda dinamica fallida: {e}")
+
+    print("[ERROR] No se pudo cargar libopus.")
+    return False
 
 
 async def fetch_stream_url(webpage_url):
@@ -36,7 +80,7 @@ class MusicPlayer:
         self.ctx = ctx
         self.queue = deque()
         self.current = None
-        self.volume = 100
+        self.volume = 0.5
         self._loop = asyncio.get_event_loop()
 
     async def add_to_queue(self, ctx, query):
@@ -67,7 +111,7 @@ class MusicPlayer:
     async def _fetch_song_info(self, query):
         loop = asyncio.get_event_loop()
         try:
-            with yt_dlp.YoutubeDL(YDL_SEARCH_OPTIONS) as ydl:
+            with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
                 if not query.startswith("http"):
                     query = f"ytsearch:{query}"
                 info = await loop.run_in_executor(
@@ -82,7 +126,7 @@ class MusicPlayer:
                     "duration": info.get("duration", 0),
                 }
         except Exception as e:
-            print(f"[ERROR] Al buscar la cancion: {e}")
+            print(f"[ERROR] Al buscar '{query}': {type(e).__name__}: {e}")
             return None
 
     async def _play_next(self, ctx):
@@ -100,13 +144,13 @@ class MusicPlayer:
         try:
             print(f"[INFO] Obteniendo stream para: {self.current['title']}")
             stream_url = await fetch_stream_url(self.current["url"])
-            print(f"[INFO] Stream URL obtenido correctamente")
+            print(f"[INFO] Stream URL obtenido, iniciando reproduccion...")
 
-            source = discord.FFmpegOpusAudio(
-                stream_url,
-                before_options=FFMPEG_BEFORE_OPTIONS,
-                options=FFMPEG_OPTIONS,
-            )
+            # Cargar libopus si aun no esta cargada
+            find_and_load_opus()
+
+            source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
+            source = discord.PCMVolumeTransformer(source, volume=self.volume)
 
             def after_playing(error):
                 if error:
@@ -120,6 +164,7 @@ class MusicPlayer:
                     print(f"[ERROR] En after_playing: {e}")
 
             vc.play(source, after=after_playing)
+            print(f"[INFO] Reproduciendo: {self.current['title']}")
 
             embed = discord.Embed(
                 title="Reproduciendo ahora",
@@ -135,5 +180,5 @@ class MusicPlayer:
 
         except Exception as e:
             print(f"[ERROR] Al reproducir '{self.current['title']}': {type(e).__name__}: {e}")
-            await ctx.send(f"No se pudo reproducir esta cancion. Saltando a la siguiente...")
+            await ctx.send("No se pudo reproducir esta cancion. Saltando...")
             await self._play_next(ctx)
