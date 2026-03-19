@@ -107,8 +107,11 @@ async def volume(ctx, level: int):
         await ctx.send("El volumen debe ser entre 0 y 100.")
         return
     player = get_player(ctx)
-    player.volume = level
-    await ctx.send(f"Volumen ajustado a {level}%. Se aplicara en la siguiente cancion.")
+    player.volume = level / 100
+    vc = ctx.voice_client
+    if vc and vc.source:
+        vc.source.volume = level / 100
+    await ctx.send(f"Volumen ajustado a {level}%.")
 
 
 @bot.command(name="queue", aliases=["q"], help="Muestra la lista de reproduccion")
